@@ -1,0 +1,1094 @@
+---
+title: "Perlis Lab: Crispr30 publication"
+author: Liam McCrea
+date: 10/30/2025
+output: html_notebook
+---
+
+
+```{r}
+
+# load packages
+library(tidyverse)
+library(data.table)
+library(dtplyr)
+library(dplyr)
+library(ggsignif)
+library(broom)
+library(plotrix)
+library(DescTools)
+library(ggpubr)
+library(ggtext)
+library(ggrepel)
+library(devtools)
+library(multcomp)
+library(lme4)
+library(emmeans)
+library(colorspace)
+
+
+# custom plot theme
+custom_theme <- theme_minimal() + 
+  theme(panel.background = element_rect(fill = "white", color = NA),
+        panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(color = "black"))+
+  theme(plot.title = element_text(hjust = 0.5, family = "Arial"), legend.position = "none",
+            axis.line = element_line(color = "black"),
+            axis.text = element_text(color = "black", family = "Arial"),
+            axis.title = element_text(face = "bold", family = "Arial"))
+
+```
+
+
+# load data to single cell level dataframe
+
+```{r}
+
+# "exp 31" - primary screen
+
+exp_31_cell <- read.csv("2025722_Exp31_CellLevel.csv") 
+
+# group to field level to remove images with cell counts outside boundaries
+field_level_filter31 <- exp_31_cell %>%
+  group_by(Experiment, Treatment, Metadata_Well, Metadata_Field) %>%
+  summarise(n_cells = n()) 
+field_level_filter31 <- field_level_filter31 %>% filter(n_cells < 86 & n_cells > 4)
+field_level_filter31 <- paste(field_level_filter31$Metadata_Well, field_level_filter31$Metadata_Field, sep = "_")
+exp_31_cell$image_filter <- paste(exp_31_cell$Metadata_Well, exp_31_cell$Metadata_Field, sep = "_")
+exp_31_cell <- exp_31_cell %>% filter(image_filter %in% field_level_filter31)
+exp_31_cell <- exp_31_cell[,-c(10)]
+
+
+
+# "exp 37" - secondary screen
+
+exp_37_cell1 <- read.csv("EXP37_raw_cells1.csv")
+exp_37_cell2 <- read.csv("EXP37_raw_cells2.csv")
+EXP_37_treatmenttable <- read.csv("EXP37_treatmenttable.csv")
+
+cell_level <- rbind(exp_37_cell1, exp_37_cell2)
+cell_level <- cell_level %>% subset(select = c(3,4,8, 11, 18, 27, 26, 31, 40, 41,42, 47, 110)) 
+cell_level <- cell_level %>% rename(SYN_Count = Children_Bait_Count, 
+                                    Mean_Bait_Area= Mean_Bait_AreaShape_Area, 
+                                    IBA_Intensity = Intensity_IntegratedIntensity_CorrectedCy5)
+cell_level <- left_join(cell_level, EXP_37_treatmenttable,by = c("Metadata_Well"))
+cell_level <- cell_level %>% 
+  mutate_at(vars(Mean_Bait_Area), ~replace_na(., 0)) %>%
+  mutate(Total_Bait_Area = Mean_Bait_Area * SYN_Count)
+
+
+# filter cell level data by field level criteria
+field_level_filter <- cell_level %>%
+  group_by(Experiment, Treatment, Metadata_Well, Metadata_Field) %>%
+  summarise(mean_area = mean(AreaShape_Area),
+            sd_area = sd(AreaShape_Area),
+            mean_Eccentricity = mean(AreaShape_Eccentricity),
+            sd_Eccentricity = sd(AreaShape_Eccentricity),
+            mean_Solidity = mean(AreaShape_Solidity),
+            sd_Solidity = sd(AreaShape_Solidity),
+            mean_IBA_intensity = mean(IBA_Intensity),
+            sd_IBA_intensity = sd(IBA_Intensity),
+            Phago_Index = sum(Total_Bait_Area) / n(),
+            sd_Phago_Index = sd(Total_Bait_Area),
+            n_cells = n()) 
+field_level_filter <- field_level_filter %>% filter(n_cells < 86 & n_cells > 4)
+field_level_filter <- paste(field_level_filter$Metadata_Well, field_level_filter$Metadata_Field, sep = "_")
+
+cell_level$image_filter <- paste(cell_level$Metadata_Well, cell_level$Metadata_Field, sep="_")
+cell_level <- cell_level %>% filter(image_filter %in% field_level_filter)
+
+cell_level <- cell_level[,-c(1,7:9,11,13,15,17:20,22)]
+cell_level <- cell_level[,c(8,9,3,1,4,5,6,7,10)]
+cell_level <- cell_level %>% rename(Cell_Level_Phago_Index = Total_Bait_Area)
+
+# combine data from the 2 experiments
+cell_level <- rbind(exp_31_cell, cell_level) 
+cell_level
+
+```
+
+
+# clean syn outliers - potential synaptosome segmentation errors 
+
+removes cells from each experiment that have areas 4 SD greater than the treatment group mean.
+
+```{r}
+
+# add the filter column by adding col for each calculation
+cell_level <- cell_level %>%
+ group_by(Experiment, Treatment) %>% 
+  mutate(Mean_Bait_Area = mean(Cell_Level_Phago_Index)) %>%
+  mutate(SD_Bait_Area = sd(Cell_Level_Phago_Index)) %>% 
+  mutate(OmitBySD = (ifelse(Cell_Level_Phago_Index > Mean_Bait_Area+(SD_Bait_Area*4),1, 0))) 
+
+# apply the filter
+cell_level <- cell_level %>% filter(OmitBySD !=1)
+cell_level
+
+```
+
+
+# field level grouping
+
+```{r}
+
+# now group to field level for possible future use
+field_level <- cell_level %>%
+  group_by(Experiment, Treatment, Metadata_Well, Metadata_Field) %>%
+  summarise(mean_area = mean(AreaShape_Area),
+            sd_area = sd(AreaShape_Area),
+            mean_Eccentricity = mean(AreaShape_Eccentricity),
+            sd_Eccentricity = sd(AreaShape_Eccentricity),
+            mean_Solidity = mean(AreaShape_Solidity),
+            sd_Solidity = sd(AreaShape_Solidity),
+            mean_IBA_intensity = mean(IBA_Intensity),
+            sd_IBA_intensity = sd(IBA_Intensity),
+            Phago_Index = sum(Cell_Level_Phago_Index) / n(),
+            sd_Phago_Index = sd(Cell_Level_Phago_Index),
+            n_cells = n())
+field_level$Treatment[field_level$Treatment=="eGFP"] <- "NEG"
+field_level$Treatment[field_level$Treatment=="NTS_eGFP"] <- "NEG"
+field_level$Treatment[field_level$Treatment=="NTS"] <- "NEG"
+field_level_31 <- field_level %>% filter(Experiment == "EXP31")
+field_level_37 <- field_level %>% filter(Experiment == "EXP37")
+
+
+```
+
+
+# group cell level data to well level
+
+```{r}
+
+# group to well level
+well_level <- cell_level %>%
+  group_by(Experiment, Treatment, Metadata_Well) %>%
+  summarise(
+  
+    Cell_Count = n(),
+    
+    mean_Eccentricity = mean(AreaShape_Eccentricity),
+    se_Eccentricity = sd(AreaShape_Eccentricity) / sqrt(n()),
+    
+    mean_Solidity = mean(AreaShape_Solidity),
+    se_Solidity = sd(AreaShape_Solidity) / sqrt(n()),
+    
+    mean_IBA_intensity = mean(IBA_Intensity),
+    se_IBA_intensity = sd(IBA_Intensity) / sqrt(n()),
+    
+    Phago_Index = sum(Cell_Level_Phago_Index) / n(),
+    se_Phago_Index = sd(Cell_Level_Phago_Index) / sqrt(n())
+  )
+
+well_level$Treatment[well_level$Treatment=="eGFP"] <- "NEG"
+well_level$Treatment[well_level$Treatment=="NTS_eGFP"] <- "NEG"
+well_level$Treatment[well_level$Treatment=="NTS"] <- "NEG"
+well_level
+
+```
+
+
+# treatment level means (mean of wells)
+
+```{r}
+
+treatment_level <- well_level %>%
+  group_by(Experiment, Treatment) %>%
+  summarise(
+            tx_mean_Eccentricity = mean(mean_Eccentricity),
+            tx_se_Eccentricity = (sd(mean_Eccentricity) / sqrt(length(mean_Eccentricity))),
+            tx_mean_Solidity = mean(mean_Solidity),
+            tx_se_Solidity = (sd(mean_Solidity) / sqrt(length(mean_Solidity))),
+            tx_mean_IBA_intensity = mean(mean_IBA_intensity),
+            tx_se_IBA_intensity = (sd(mean_IBA_intensity) / sqrt(length(mean_IBA_intensity))),
+            tx_mean_Phago_Index = mean(Phago_Index),
+            tx_se_Phago_Index = (sd(Phago_Index) / sqrt(length(Phago_Index))))
+treatment_level
+
+
+```
+
+
+# Results
+
+## primary screen phago results plot
+
+```{r}
+
+# set up LOG2FC data for plot 
+log2fc_df <- well_level[,c(1,2,11)]
+log2fc_df <- log2fc_df %>% filter(Experiment == "EXP31")
+log2fc_df$log2FC <- log2(log2fc_df$Phago_Index / mean(log2fc_df$Phago_Index[log2fc_df$Treatment=="NEG"]))
+
+# group to treatment level 
+log2fc_df <- log2fc_df %>%
+  group_by(Treatment) %>%
+  summarise(mean_log2FC = mean(log2FC),
+            se_log2FC = (sd(log2FC) / sqrt(length(log2FC))))
+
+
+log2fc_df$Treatment <- factor(log2fc_df$Treatment)
+log2fc_df <- log2fc_df %>% filter(Treatment != "NEG")
+
+# plot
+p1 <- log2fc_df %>% filter(Treatment != "NEG") %>% ggplot(aes(x = reorder(Treatment, mean_log2FC), y = mean_log2FC)) +
+  geom_bar(stat = "identity", fill="black", color="black", width=0.75) +
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  #scale_color_manual(values = color_tags) +
+  geom_errorbar(data = log2fc_df[log2fc_df$mean_log2FC>0,], aes(ymin = mean_log2FC,
+                    ymax = mean_log2FC + se_log2FC),
+                width = 0.5, color="black", linewidth = 0.3) +
+  geom_errorbar(data = log2fc_df[log2fc_df$mean_log2FC<0,], aes(ymin = mean_log2FC- se_log2FC,
+                    ymax = mean_log2FC),
+                width = 0.5, color="black", linewidth = 0.3) +
+  theme(
+    axis.title = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "black")) +
+  custom_theme +
+  theme(axis.text.y = element_text(family = "Arial", face = "italic", colour = "black"),
+        axis.title.y = element_text(family = "Arial", face="bold"),
+        axis.title.x = element_text(face = "bold")) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+  labs(y = bquote(bold(log[2]*"FC")), x="") +
+  geom_hline(yintercept = 0, color = "black")
+p1
+
+#ggsave(filename = "./10.31_updated_plots/figure2.png", plot = p1, width = 6, height = 5, units = "in", dpi = 300)
+
+
+```
+
+
+## primary and secondary experiments' phagocytosis correlation 
+
+```{r}
+
+
+# setup data
+plot_df <- treatment_level
+plot_df <- plot_df %>% filter(Treatment %in% plot_df$Treatment[plot_df$Experiment=="EXP37"]) 
+
+plot_df_primary <- plot_df %>% filter(Experiment == "EXP31")
+new_names <- c()
+for (name in names(plot_df_primary[,c(3:length(plot_df_primary))])) {
+  new_names <- c(new_names,paste("primary_",name, sep=""))
+}
+names(plot_df_primary)[3:length(plot_df_primary)] <- new_names
+
+plot_df_secondary <- plot_df %>% filter(Experiment == "EXP37")
+new_names <- c()
+for (name in names(plot_df_secondary[,c(3:length(plot_df_primary))])) {
+  new_names <- c(new_names,paste("secondary_",name, sep=""))
+}
+names(plot_df_secondary)[3:length(plot_df_secondary)] <- new_names
+
+plot_df <- left_join(plot_df_primary[,c(2,9,10)], plot_df_secondary[,c(2,9,10)], by="Treatment")
+
+plot_df$control <- c("no", "no", "no", "no","no", "control", "no", "no", "no", "no")
+
+
+
+# model
+phago_model <- lm(secondary_tx_mean_Phago_Index ~ primary_tx_mean_Phago_Index, data = plot_df)
+phago_r2 <- summary(phago_model)$r.squared  
+phago_r2_label <- paste0("R² = ", round(phago_r2, 3))
+p_value_label <- summary(phago_model)$coefficients[2, 4]
+
+# plot 
+dotplot1 <- ggplot(plot_df, aes(x = primary_tx_mean_Phago_Index, 
+                                    y = secondary_tx_mean_Phago_Index, 
+                                    color = control, fill = control)) + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +
+  
+  geom_errorbar(aes(ymin = secondary_tx_mean_Phago_Index - secondary_tx_se_Phago_Index,
+                    ymax = secondary_tx_mean_Phago_Index + secondary_tx_se_Phago_Index),
+                width = 10, color="black", linewidth = 0.3) +
+  geom_errorbarh(aes(xmin = primary_tx_mean_Phago_Index - primary_tx_se_Phago_Index,
+                     xmax = primary_tx_mean_Phago_Index + primary_tx_se_Phago_Index),
+                 height = 15, color="black", linewidth = 0.3) +
+  scale_color_manual(values = c("blue","black")) + 
+  geom_point(size = 1) +
+  labs(title = "") +
+  annotate("text", x = 100, y = 800, label = phago_r2_label, hjust = 0, size = 3) +
+  annotate("text", x = 100, y = 770,
+         label = paste0("italic(p) == ", format.pval(p_value_label, digits = 3)),
+         parse = TRUE, hjust = 0, size = 3)+  custom_theme +
+  xlab("Mean Phago Index primary") + ylab("Mean Phago Index secondary") +
+  geom_text_repel(data = plot_df,
+                  aes(x = primary_tx_mean_Phago_Index, 
+                      y = secondary_tx_mean_Phago_Index, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  box.padding = 0.15,     
+                  point.padding = 0.5,    
+                  min.segment.length = 0, 
+                  segment.color = "grey50",
+                  max.overlaps = Inf, 
+                  family = "Arial", 
+                  fontface = "italic")
+
+dotplot1
+
+```
+
+
+## check primary and secondary experiments' phagocytosis correlation without ITGAM
+
+```{r}
+
+plot_df <- plot_df %>% filter(Treatment != "ITGAM") # added filter
+
+plot_df$control <- c("no", "no", "no","no", "control", "no", "no", "no", "no") # fix labels
+
+
+# model
+phago_model <- lm(primary_tx_mean_Phago_Index ~ secondary_tx_mean_Phago_Index, data = plot_df)
+phago_r2 <- summary(phago_model)$r.squared 
+phago_r2_label <- paste0("R² = ", round(phago_r2, 3))
+p_value_label <- summary(phago_model)$coefficients[2, 4]
+
+# plot 
+dotplot2 <- ggplot(plot_df, aes(x = primary_tx_mean_Phago_Index, 
+                                    y = secondary_tx_mean_Phago_Index, 
+                                    color = control, fill = control)) + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +
+
+  geom_errorbar(aes(ymin = secondary_tx_mean_Phago_Index - secondary_tx_se_Phago_Index,
+                    ymax = secondary_tx_mean_Phago_Index + secondary_tx_se_Phago_Index),
+                width = 10, color="black", linewidth = 0.3) +
+  geom_errorbarh(aes(xmin = primary_tx_mean_Phago_Index - primary_tx_se_Phago_Index,
+                     xmax = primary_tx_mean_Phago_Index + primary_tx_se_Phago_Index),
+                 height = 15, color="black", linewidth = 0.3) +
+  scale_color_manual(values = c("blue","black")) + 
+  geom_point(size = 1) +
+  labs(title = "") +
+  annotate("text", x = 100, y = 800, label = phago_r2_label, hjust = 0, size = 3) +
+  annotate("text", x = 100, y = 770,
+         label = "italic(p) == '<0.001'",
+         parse = TRUE, hjust = 0, size = 3)+
+  custom_theme +
+  xlab("Mean Phago Index primary") + ylab("Mean Phago Index secondary") +
+  geom_text_repel(data = plot_df,
+                  aes(x = primary_tx_mean_Phago_Index, 
+                      y = secondary_tx_mean_Phago_Index, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  box.padding = 0.15,   
+                  point.padding = 0.5, 
+                  min.segment.length = 0,
+                  segment.color = "grey50",
+                  max.overlaps = Inf, 
+                  family = "Arial", 
+                  fontface = "italic") 
+dotplot2
+
+
+```
+
+
+## primary morphology 
+
+```{r}
+
+plot_df <- treatment_level
+plot_df <- plot_df %>% filter( Experiment == "EXP31") 
+
+
+# add in color labels for labeling only the hits in red and with text
+hits <- c("hit", "hit", "hit", "hit", "hit", "hit", "hit", "hit", "hit", "control", rep("non_hit", 21))
+genes <- c("MSR1", "CYFIP1", "TREM2", "VRK2", "SYK", "IRF8", "VAV1", "ITGAM", "ITGB2", "NEG", 
+          "TLR2", "AIF1", "NCKAP1L", "ARHGAP25", "DOCK2", "BIN2", "PTPRC", "SLC11A1", "CD300A", "CTSS", 
+  "OLR1", "HLA-DMB", "CD14", "TLR6", "FCGR3B", "FCAR", "C3", "FCGR3A", "PLD4", "FCGR2A", "CLEC7A")
+labels_df <- data.frame(hit_label = hits, Treatment = genes) # make df
+plot_df <- left_join(plot_df, labels_df, by=c("Treatment")) # join to morphology by gene name
+
+# label data
+label_data <- plot_df %>%
+  filter(hit_label == "hit")
+
+label_data_control <- plot_df %>%
+  filter(hit_label=="control")
+
+# model
+phago_model <- lm(tx_mean_Solidity ~ tx_mean_Eccentricity, data = plot_df)
+phago_r2 <- summary(phago_model)$r.squared  
+model_r2_label <- paste0("R² = ", round(phago_r2, 3))
+p_value_label <- summary(phago_model)$coefficients[2, 4]
+
+
+dotplot3 <- ggplot(plot_df, aes(x = tx_mean_Eccentricity, 
+                                    y = tx_mean_Solidity, 
+                                    color = hit_label, fill = hit_label)) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +  
+
+  geom_errorbar(aes(ymin = tx_mean_Solidity - tx_se_Solidity,
+                    ymax = tx_mean_Solidity + tx_se_Solidity),
+                width = 0.001, linewidth = 0.2) +
+  geom_errorbarh(aes(xmin = tx_mean_Eccentricity - tx_se_Eccentricity,
+                     xmax = tx_mean_Eccentricity + tx_se_Eccentricity),
+                 height = 0.004, linewidth = 0.2) +
+  geom_point(size = 1) +
+  labs(title = "") +
+  custom_theme +
+  coord_cartesian(xlim = c(0.775, 0.875), ylim = c(0.5, 0.75)) +
+  xlab("Mean Eccentricity") + ylab("Mean Solidity") +
+  scale_color_manual(values = c("blue", "black", "black")) + 
+  scale_fill_manual(values = c("blue", "black", "black")) +
+  annotate("text", x = 0.775, y = 0.75, label = model_r2_label, hjust = 0, size = 3) + 
+  annotate("text", x = 0.775, y = 0.735,
+         label = "italic(p) == '<0.001'",
+         parse = TRUE, hjust = 0, size = 3) +
+  geom_text_repel(data = label_data,
+                  aes(x = tx_mean_Eccentricity, 
+                      y = tx_mean_Solidity, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  box.padding = 0.15,     
+                  point.padding = 0.5,    
+                  min.segment.length = 0, 
+                  segment.color = "grey50",
+                  max.overlaps = Inf) +
+  geom_text_repel(data = label_data_control,
+                  aes(x = tx_mean_Eccentricity, 
+                      y = tx_mean_Solidity, 
+                      label = Treatment),
+                  color = "blue", size = 3,
+                  box.padding = 0.15,  
+                  point.padding = 0.5,    
+                  min.segment.length = 0, 
+                  segment.color = "grey50",
+                  max.overlaps = Inf)
+   
+dotplot3
+
+
+```
+
+
+## secondary morphology 
+
+```{r}
+
+
+plot_df <- treatment_level
+plot_df <- plot_df %>% filter( Experiment == "EXP37") 
+
+# add blue dot for NEG
+hit_label <- c("hit", "hit", "hit", "hit", "hit", "control", "hit", "hit", "hit", "hit")
+plot_df$hit_label <- hit_label
+
+
+# model
+phago_model <- lm(tx_mean_Solidity ~ tx_mean_Eccentricity, data = plot_df)
+phago_r2 <- summary(phago_model)$r.squared  # this gives the R² value
+model_r2_label <- paste0("R² = ", round(phago_r2, 3))
+p_value_label <- summary(phago_model)$coefficients[2, 4]
+
+
+dotplot4 <- ggplot(plot_df, aes(x = tx_mean_Eccentricity, 
+                                    y = tx_mean_Solidity,
+                                    color = hit_label, fill = hit_label)) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +  
+
+  geom_errorbar(aes(ymin = tx_mean_Solidity - tx_se_Solidity,
+                    ymax = tx_mean_Solidity + tx_se_Solidity),
+                width = 0.001, linewidth = 0.2) +
+  geom_errorbarh(aes(xmin = tx_mean_Eccentricity - tx_se_Eccentricity,
+                     xmax = tx_mean_Eccentricity + tx_se_Eccentricity),
+                 height = 0.004, linewidth = 0.2) +
+  geom_point(size = 1) +
+  scale_color_manual(values = c("blue", "black", "black")) + 
+  scale_fill_manual(values = c("blue", "black", "black")) +
+  labs(title = "") +
+  custom_theme +
+  coord_cartesian(xlim = c(0.725, 0.825), ylim = c(0.55, 0.75)) +
+  xlab("Mean Eccentricity") + ylab("Mean Solidity") +
+  annotate("text", x = 0.725, y = 0.6, label = model_r2_label, hjust = 0, size = 3) + 
+  annotate("text", x = 0.725, y = 0.585,
+         label = paste("italic(p) ==",round(p_value_label,4)),
+         parse = TRUE, hjust = 0, size = 3) +
+  geom_text_repel(data = plot_df,
+                  aes(x = tx_mean_Eccentricity, 
+                      y = tx_mean_Solidity, 
+                      label = Treatment),
+                  size = 3,
+                  color = "black",
+                  box.padding = 0.15,  
+                  point.padding = 0.5,  
+                  min.segment.length = 0,
+                  segment.color = "grey50",
+                  max.overlaps = Inf)
+dotplot4
+
+```
+
+
+## secondary E x phago
+
+```{r}
+
+# uses same plot df
+plot_df <- treatment_level
+plot_df <- plot_df %>% filter( Experiment == "EXP37") 
+
+# add blue dot for NEG
+hit_label <- c("hit", "hit", "hit", "hit", "hit", "control", "hit", "hit", "hit", "hit")
+plot_df$hit_label <- hit_label
+
+
+# model
+model <- lm(tx_mean_Phago_Index ~ tx_mean_Eccentricity, data = plot_df)
+model_r2 <- summary(model)$r.squared  # this gives the R² value
+model_r2_label <- paste0("R² = ", round(model_r2, 3))
+p_value_label <- summary(model)$coefficients[2, 4]
+
+# plot
+dotplot5 <- ggplot(plot_df, aes(x = tx_mean_Eccentricity, 
+                                    y = tx_mean_Phago_Index,
+                                color=hit_label, fill=hit_label)) + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +
+  geom_errorbar(aes(ymin = tx_mean_Phago_Index - tx_se_Phago_Index,
+                    ymax = tx_mean_Phago_Index + tx_se_Phago_Index),
+                width = 0.001, color="black", linewidth = 0.2) +
+  geom_errorbarh(aes(xmin = tx_mean_Eccentricity - tx_se_Eccentricity,
+                     xmax = tx_mean_Eccentricity + tx_se_Eccentricity),
+                 height = 15, color="black", linewidth = 0.2) +
+  geom_point(size = 1) +
+  labs(title = "") +
+  custom_theme +
+  coord_cartesian(xlim = c(0.725, 0.825)) +
+  xlab("Mean Eccentricity") + ylab("Mean Phagocytic Index") +
+  scale_color_manual(values = c("blue", "black")) + 
+  scale_fill_manual(values = c("blue", "black")) +
+  annotate("text", x = 0.725, y = 40, label = model_r2_label, hjust = 0, size = 3) +
+  annotate("text", x = 0.725, y = 00,
+         label = paste0("italic(p) == ", format.pval(p_value_label, digits = 3, eps = 0.001)),
+         parse = TRUE, hjust = 0, size = 3)+
+  geom_text_repel(data = plot_df,
+                  aes(x = tx_mean_Eccentricity, 
+                      y = tx_mean_Phago_Index, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  box.padding = 0.15,   
+                  point.padding = 0.5,    
+                  min.segment.length = 0, 
+                  segment.color = "grey50",
+                  max.overlaps = Inf,
+                  fontface = "italic") 
+dotplot5
+
+#ggsave(filename = "./10.31_updated_plots/figure3A.png", plot = dotplot7, width = 8, height = 5, units = "in", dpi = 300)
+
+```
+
+## secondary S x phago
+
+```{r}
+
+model <- lm(tx_mean_Phago_Index ~ tx_mean_Solidity, data = plot_df)
+model_r2 <- summary(model)$r.squared  # this gives the R² value
+model_r2_label <- paste0("R² = ", round(model_r2, 3))
+p_value_label <- summary(model)$coefficients[2, 4]
+
+
+dotplot6 <- ggplot(plot_df, aes(x = tx_mean_Solidity, 
+                                    y = tx_mean_Phago_Index, 
+                                color = hit_label, fill = hit_label)) + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +
+
+  geom_errorbar(aes(ymin = tx_mean_Phago_Index - tx_se_Phago_Index,
+                    ymax = tx_mean_Phago_Index + tx_se_Phago_Index),
+                width = 0.002, color="black", linewidth = 0.2) +
+  geom_errorbarh(aes(xmin = tx_mean_Solidity - tx_se_Solidity,
+                     xmax = tx_mean_Solidity + tx_se_Solidity),
+                 height = 15, color="black", linewidth = 0.2) +
+  geom_point(size = 1) +
+  labs(title = "") +
+  custom_theme +
+  coord_cartesian(xlim = c(0.575, 0.775)) +
+  xlab("Mean Solidity") + ylab("Mean Phagocytic Index") +
+  scale_color_manual(values = c("blue", "black")) + 
+  scale_fill_manual(values = c("blue", "black")) +
+  annotate("text", x = 0.575, y = 540, label = model_r2_label, hjust = 0, size = 3) +
+  annotate("text", x = 0.575, y = 500,
+         label = paste0("italic(p) == ", format.pval(p_value_label, digits = 3, eps = 0.001)),
+         parse = TRUE, hjust = 0, size = 3)+
+  geom_text_repel(data = plot_df,
+                  aes(x = tx_mean_Solidity, 
+                      y = tx_mean_Phago_Index, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  
+                  box.padding = 0.15,     
+                  point.padding = 0.5,    
+                  min.segment.length = 0,
+                  segment.color = "grey50",
+                  max.overlaps = Inf,
+                  fontface = "italic") 
+dotplot6
+
+#ggsave(filename = "./10.31_updated_plots/figure3B.png", plot = dotplot8, width =8, height = 5, units = "in", dpi = 300)
+
+```
+
+
+## Eccentricity primary vs secondary
+
+```{r}
+
+# filter samples to only include ones included in both exp's
+plot_df <- treatment_level
+plot_df <- plot_df %>% filter(Treatment %in% plot_df$Treatment[plot_df$Experiment=="EXP37"]) 
+
+plot_df_primary <- plot_df %>% filter(Experiment == "EXP31")
+new_names <- c()
+# add label since column names are the same
+for (name in names(plot_df_primary[,c(3:length(plot_df_primary))])) {
+  new_names <- c(new_names,paste("primary_",name, sep="")) 
+}
+names(plot_df_primary)[3:length(plot_df_primary)] <- new_names
+
+# same for secondary data 
+plot_df_secondary <- plot_df %>% filter(Experiment == "EXP37")
+new_names <- c()
+for (name in names(plot_df_secondary[,c(3:length(plot_df_primary))])) {
+  new_names <- c(new_names,paste("secondary_",name, sep=""))
+}
+names(plot_df_secondary)[3:length(plot_df_secondary)] <- new_names
+
+
+# join back together
+plot_df <- left_join(plot_df_primary[,c(2,3,4)], plot_df_secondary[,c(2,3,4)], by="Treatment")
+plot_df$control <- c("no", "no", "no", "no","no", "control", "no", "no", "no", "no")
+
+
+# model
+phago_model <- lm(secondary_tx_mean_Eccentricity ~ primary_tx_mean_Eccentricity, data = plot_df)
+phago_r2 <- summary(phago_model)$r.squared  # this gives the R² value
+phago_r2_label <- paste0("R² = ", round(phago_r2, 3))
+p_value_label <- summary(phago_model)$coefficients[2, 4]
+
+
+# plot 
+dotplot7 <- ggplot(plot_df, aes(x = primary_tx_mean_Eccentricity, 
+                                    y = secondary_tx_mean_Eccentricity, 
+                                    color = control, fill = control)) + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +
+  geom_errorbar(aes(ymin = secondary_tx_mean_Eccentricity - secondary_tx_se_Eccentricity,
+                    ymax = secondary_tx_mean_Eccentricity + secondary_tx_se_Eccentricity),
+                width = 0.001, color="black", linewidth = 0.3) +
+  geom_errorbarh(aes(xmin = primary_tx_mean_Eccentricity - primary_tx_se_Eccentricity,
+                     xmax = primary_tx_mean_Eccentricity + primary_tx_se_Eccentricity),
+                 height = 0.002, color="black", linewidth = 0.3) +
+  scale_color_manual(values = c("blue","black")) + 
+  geom_point(size = 1) +
+  coord_cartesian(xlim=c(0.775,0.875), ylim=c(0.7,0.875)) +
+  labs(title = "") +
+  annotate("text", x = 0.775, y = 0.875, label = phago_r2_label, hjust = 0, size = 3) +
+  annotate("text", x = 0.775, y = 0.865,
+         label = paste0("italic(p) == ", format.pval(p_value_label, digits = 3, eps = 0.001)),
+         parse = TRUE, hjust = 0, size = 3)+  custom_theme +
+  xlab("Mean Eccentricity primary") + ylab("Mean Eccentricity secondary") +
+  geom_text_repel(data = plot_df,
+                  aes(x = primary_tx_mean_Eccentricity, 
+                      y = secondary_tx_mean_Eccentricity, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  box.padding = 0.15,  
+                  point.padding = 0.5,  
+                  min.segment.length = 0, 
+                  segment.color = "grey50",
+                  max.overlaps = Inf, 
+                  family = "Arial", 
+                  fontface = "italic") 
+dotplot7
+
+```
+
+
+## Solidity primary vs secondary
+
+```{r}
+
+# same but for solidity columns this time
+plot_df <- left_join(plot_df_primary[,c(2,5,6)], plot_df_secondary[,c(2,5,6)], by="Treatment")
+plot_df$control <- c("no", "no", "no", "no","no", "control", "no", "no", "no", "no")
+
+
+# model
+phago_model <- lm(secondary_tx_mean_Solidity ~ primary_tx_mean_Solidity, data = plot_df)
+phago_r2 <- summary(phago_model)$r.squared  # this gives the R² value
+phago_r2_label <- paste0("R² = ", round(phago_r2, 3))
+p_value_label <- summary(phago_model)$coefficients[2, 4]
+
+# plot 
+dotplot8 <- ggplot(plot_df, aes(x = primary_tx_mean_Solidity, 
+                                    y = secondary_tx_mean_Solidity, 
+                                    color = control, fill = control)) + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +
+  geom_errorbar(aes(ymin = secondary_tx_mean_Solidity - secondary_tx_se_Solidity,
+                    ymax = secondary_tx_mean_Solidity + secondary_tx_se_Solidity),
+                width = 0.002, color="black", linewidth = 0.3) +
+  geom_errorbarh(aes(xmin = primary_tx_mean_Solidity - primary_tx_se_Solidity,
+                     xmax = primary_tx_mean_Solidity + primary_tx_se_Solidity),
+                 height = 0.0035, color="black", linewidth = 0.3) +
+  scale_color_manual(values = c("blue","black")) + 
+  geom_point(size = 1) +
+  coord_cartesian(xlim=c(0.55,0.725), ylim=c(0.55,0.75)) +
+  labs(title = "") +
+  annotate("text", x = 0.55, y = 0.75, label = phago_r2_label, hjust = 0, size = 3) +
+  annotate("text", x = 0.55, y = 0.74,
+         label = "italic(p) == '<0.001'",
+         parse = TRUE, hjust = 0, size = 3)+  custom_theme +
+  xlab("Mean Solidity primary") + ylab("Mean Solidity secondary") +
+  geom_text_repel(data = plot_df,
+                  aes(x = primary_tx_mean_Solidity, 
+                      y = secondary_tx_mean_Solidity, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  box.padding = 0.15,   
+                  point.padding = 0.5,   
+                  min.segment.length = 0, 
+                  segment.color = "grey50",
+                  max.overlaps = Inf, 
+                  family = "Arial", 
+                  fontface = "italic") 
+dotplot8
+
+```
+
+
+## Secondary screen phago stat test 
+
+running non-parametric tests to compare phagocytosis values per gene to negative control
+
+```{r}
+
+
+phago37 <- well_level
+phago37 <- phago37 %>% filter( Experiment == "EXP37") 
+
+# Get all treatments except control
+treatments <- setdiff(phago37$Treatment, "NEG")
+
+# Initialize vectors to store p-values and directions
+pvals_less <- c()
+pvals_greater <- c()
+
+# Keep track of which treatments correspond to which test type
+less_treats <- c()      # Treatments tested with "less"
+greater_treats <- c()   # Treatments tested with "greater"
+
+for(treat in unique(phago37$Treatment)) {
+  control_vals <- phago37$Phago_Index[phago37$Treatment == "NEG"]
+  treat_vals <- phago37$Phago_Index[phago37$Treatment == treat]
+
+
+  # run particular direction of test known for each treatment based on primary data
+  if (treat %in% c("MSR1", "CYFIP1", "VRK2", "TREM2")) {
+    # one-tailed test - less
+    test <- wilcox.test(treat_vals, control_vals, alternative = "less")
+    pvals_less[treat] <- test$p.value
+    less_treats <- c(less_treats, treat)
+  } else if (treat %in% c("NEG")) { 
+    
+    next # (skipping comparing NEG to NEG)
+    
+  } else{
+    # one-tailed test - greater
+    test <- wilcox.test(treat_vals, control_vals, alternative = "greater")
+    pvals_greater[treat] <- test$p.value
+    greater_treats <- c(greater_treats, treat)
+  }
+}
+
+
+# Adjust p-values separately
+pvals_adj_less <- p.adjust(pvals_less, method = "BH")
+pvals_adj_greater <- p.adjust(pvals_greater, method = "BH")
+
+# Combine results into one data.frame
+results_less <- data.frame(
+  Comparison = paste(less_treats, "vs NEG"),
+  p_value = pvals_less[less_treats],
+  p_adjusted = pvals_adj_less[less_treats]
+)
+
+results_greater <- data.frame(
+  Comparison = paste(greater_treats, "vs NEG"),
+  p_value = pvals_greater[greater_treats],
+  p_adjusted = pvals_adj_greater[greater_treats]
+)
+
+# Bind the two result sets together
+results37 <- rbind(results_less, results_greater)
+
+# Optional: format adjusted p-values nicely
+results37$p_adjusted <- sprintf("%.3f", results37$p_adjusted)
+
+# Reorder rows by Treatment if needed
+results37 <- results37[order(results37$p_adjusted), ]
+results37
+
+# manually add * to next plot based on these results
+
+```
+
+
+## secondary screen bar plot
+
+```{r}
+
+
+# set up LOG2FC data for plot 
+log2fc_df <- well_level 
+log2fc_df <- log2fc_df[,c(1,2,11)]
+log2fc_df <- log2fc_df %>% filter(Experiment == "EXP37")
+log2fc_df$log2FC <- log2(log2fc_df$Phago_Index / mean(log2fc_df$Phago_Index[log2fc_df$Treatment=="NEG"]))
+
+# group to treatment level 
+log2fc_df <- log2fc_df %>%
+  group_by(Treatment) %>%
+  summarise(mean_log2FC = mean(log2FC),
+            se_log2FC = (sd(log2FC) / sqrt(length(log2FC))))
+
+log2fc_df$Treatment <- factor(log2fc_df$Treatment)
+log2fc_df <- log2fc_df %>% filter(Treatment != "NEG")
+
+log2fc_df_37 <- log2fc_df
+
+# plot
+barchart2 <- log2fc_df_37 %>% ggplot(aes(x = reorder(Treatment, mean_log2FC), y = mean_log2FC)) +
+  geom_bar(stat = "identity", color="black", fill="black") +
+  coord_flip() +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "black")) +
+  labs(x = "") +
+  custom_theme +
+  theme(axis.text.y = element_text(family = "Arial", face = "italic", colour = "black"),
+        axis.title.y = element_text(family = "Arial"),
+        axis.title.x = element_text(face = "bold")) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.05))) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_errorbar(data = log2fc_df_37[log2fc_df_37$mean_log2FC>0,], aes(ymin = mean_log2FC,
+                    ymax = mean_log2FC+ se_log2FC),
+                width = 0.5, color="black", linewidth = 0.3) +
+  labs(y = bquote(bold(log[2]*"FC")), x="") +
+  geom_errorbar(data = log2fc_df_37[log2fc_df_37$mean_log2FC<0,], aes(ymin = mean_log2FC- se_log2FC,
+                    ymax = mean_log2FC),
+                width = 0.5, color="black", linewidth = 0.3) +
+  labs(y = bquote(bold(log[2]*"FC")), x="") +
+  geom_text(data = data.frame(Treatment = "ITGB2", tx_mean_Solidity = 0.77), 
+    aes(x = Treatment, y = 2.1, label = "*"),
+    size = 8,
+    vjust = 0.9) + 
+  geom_text(data = data.frame(Treatment = "ITGAM", tx_mean_Solidity = 0.77), 
+    aes(x = Treatment, y = 2.1, label = "*"),
+    size = 8,
+    vjust = 0.9) +
+  geom_text(data = data.frame(Treatment = "CYFIP1", tx_mean_Solidity = 0.77), 
+    aes(x = Treatment, y = -1.9, label = "*"),
+    size = 8,
+    vjust = 0.9) +
+  geom_text(data = data.frame(Treatment = "MSR1", tx_mean_Solidity = 0.77), 
+    aes(x = Treatment, y = -1.9, label = "*"),
+    size = 8,
+    vjust = 0.9) 
+barchart2
+
+
+```
+
+
+## CD68 data join
+
+```{r}
+
+# load CD68 data in
+CD681 <- read_csv("CD68_Cells1.csv")
+CD682 <- read_csv("CD68_Cells2.csv")
+CD68 <- rbind(CD681, CD682)
+CD68 <- CD68[,c(4,11,20,53, 45, 276)]
+CD68$CD68_intensity <- (CD68$Children_CD68_Count*CD68$Mean_CD68_Intensity_IntegratedIntensity_CorrectedFITC)
+CD68$CD68_intensity[is.na(CD68$Mean_CD68_Intensity_IntegratedIntensity_CorrectedFITC)==TRUE] <- 0
+CD68 <- CD68[,c(1,2,7)]
+
+# group to well level
+CD68 <- CD68 %>% group_by(Metadata_Well) %>%
+  summarise(mean_CD68_intensity =  mean(CD68_intensity),
+            se_CD68_intensity = (sd(CD68_intensity) / sqrt(n())))
+  
+
+# merge to all well level data in EXP 37
+well_level37 <- well_level %>% filter(Experiment == "EXP37")
+well_level37 <- left_join(well_level37, CD68, by=c("Metadata_Well"))
+
+# merge to treatment for plotting
+tx_level37 <- well_level37 %>% group_by(Treatment) %>% 
+  summarise(tx_mean_CD68 = mean(mean_CD68_intensity),
+            tx_se_CD68 = sd(mean_CD68_intensity) / sqrt(n()),
+  tx_mean_IBA1 = mean(mean_IBA_intensity),
+  tx_se_IBA1 = sd(mean_IBA_intensity) / sqrt(n()),
+  tx_mean_phago = mean(Phago_Index),
+  tx_se_phago = sd(Phago_Index) / sqrt(n()),
+  tx_mean_Eccentricity = mean(mean_Eccentricity),
+  tx_mean_Solidity = mean(mean_Solidity))
+
+tx_level37$control <- c("no", "no", "no","no","no", "control", "no", "no", "no", "no")
+
+#well_level31 <- well_level %>% filter(Experiment == "EXP31")
+
+
+```
+
+
+
+## CD68 x phago
+
+```{r}
+
+# model 2
+phago_model <- lm(tx_mean_phago ~ tx_mean_CD68, data = tx_level37)
+phago_r2 <- summary(phago_model)$r.squared  # this gives the R² value
+model_r2_label <- paste0("R² = ", round(phago_r2, 3))
+p_value_label <- summary(phago_model)$coefficients[2, 4]
+
+
+dotplot9 <- ggplot(tx_level37, aes(x = tx_mean_CD68, 
+                                    y = tx_mean_phago, color=control)) + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgray", fill = "grey80") +
+  geom_point(size = 1) +
+  labs(title = "") +
+  custom_theme +
+  annotate("text", x = 15, y = 600, label = model_r2_label, hjust = 0, size = 3) +
+  annotate("text", x = 15, y = 570,
+         label = "italic(p) == '<0.001'",
+         parse = TRUE, hjust = 0, size = 3)+
+  coord_cartesian(xlim=c(15,40))+
+  labs(x="Mean CD68 Intensity", y="Mean Phagocytic Index")+
+  geom_errorbar(aes(ymin = tx_mean_phago - tx_se_phago,
+                    ymax = tx_mean_phago + tx_se_phago),
+                width = 0.2, color="black", linewidth = 0.2) +
+  geom_errorbarh(aes(xmin = tx_mean_CD68 - tx_se_CD68,
+                     xmax = tx_mean_CD68 + tx_se_CD68),
+                 height = 12, color="black", linewidth = 0.2) +
+  geom_text_repel(data = tx_level37,
+                  aes(x = tx_mean_CD68, 
+                      y = tx_mean_phago, 
+                      label = Treatment),
+                  color = "black", size = 3,
+                  box.padding = 0.15,     
+                  point.padding = 0.5,   
+                  min.segment.length = 0, 
+                  segment.color = "grey50",
+                  max.overlaps = Inf,
+                  fontface = "italic") +
+  scale_color_manual(values = c("blue","black"))
+
+dotplot9
+
+
+```
+
+
+
+## PCA for 4 features
+
+code adapted from original code written by RB
+
+```{r}
+
+# create function to calculate and plot PCA
+
+run_pca <- function(data, color_col, label_col = NULL, arrow_scale = 5,
+                    title = "PCA Plot", add_labels = TRUE,
+                    point_size = 3, point_alpha = 1) {
+  features <- data %>% 
+    dplyr::select(-all_of(c("Treatment", "control")))
+  
+  # PCA
+  pca_res <- prcomp(features, scale. = TRUE)
+  
+  # Scores
+  pca_df <- as.data.frame(pca_res$x)
+  pca_df$Color <- as.factor(data[[color_col]])
+  if (!is.null(label_col)) {
+    pca_df$Label <- data[[label_col]]
+  }
+  
+  # Loadings
+  loadings <- as.data.frame(pca_res$rotation[, 1:2])
+  loadings$Feature <- rownames(loadings)
+  loadings <- loadings %>%
+    mutate(PC1 = PC1 * arrow_scale,
+           PC2 = PC2 * arrow_scale)
+  
+
+  #pca_df$dot_color <- ifelse(pca_df$Color == "control", "blue", "black")
+
+  
+  # abstract plot
+  g <- ggplot(pca_df, aes(PC1, PC2)) +
+    geom_point(aes(color = Color), size = point_size, alpha = point_alpha) +
+    geom_segment(data = loadings, aes(x = 0, y = 0, xend = PC1, yend = PC2),
+                 arrow = arrow(length = unit(0.2, "cm")),
+                 inherit.aes = FALSE, color = "black") +
+    geom_text_repel(data = loadings, aes(x = PC1, y = PC2, label = Feature),
+                    inherit.aes = FALSE, color = "red1", size = 4,
+                    max.overlaps = Inf) +
+    theme_minimal() +
+    scale_color_manual(values = c("blue", "black")) +
+    theme(legend.position = "none") +
+    labs(
+      title = title,
+      color = "Treatment",
+      x = paste0("PC1 (", round(100 * summary(pca_res)$importance[2, 1], 1), "%)"),
+      y = paste0("PC2 (", round(100 * summary(pca_res)$importance[2, 2], 1), "%)")
+    ) 
+  
+  if (!is.null(label_col) && add_labels) {
+    g <- g + geom_text_repel(aes(label = Label), color = "black", size = 3, show.legend = FALSE)
+  }
+  
+  return(g)
+}
+
+# change loading names for plot
+colnames(tx_level37)[6] <- "tx_mean_Phagocytic Index" 
+colnames(tx_level37) = gsub("tx_mean_","",colnames(tx_level37))
+tx_level37$control <- as.factor(tx_level37$control)
+
+
+# use function
+pca_plot <- run_pca(
+  data = tx_level37 %>%
+    dplyr::select(Treatment,
+           "CD68",
+           #"IBA1",
+           "Phagocytic Index",
+           "Eccentricity",
+           "Solidity",
+           "control"),
+  color_col = "control",
+  label_col = "Treatment",
+  title = "",
+  add_labels = T,
+  point_size = 1.5,       
+  point_alpha = 0.6 
+)
+pca_plot
+
+#ggsave(filename = "./10.31_updated_plots/figure3D.png", plot = pca_plot, width = 7, height = 5, units = "in", dpi = 300)
+
+
+```
+
+
