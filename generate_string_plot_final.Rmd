@@ -1,0 +1,305 @@
+---
+title: "crispr30 manuscript STRING plot"
+author: Liam McCrea
+date: 10/30/2025
+output: html_notebook
+---
+
+
+```{r}
+
+library(DESeq2)
+library(STRINGdb)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(igraph)
+library(ggraph)
+library(STRINGdb)
+library(openxlsx)
+library(dplyr)
+library(tidygraph)
+library(readr)
+library(tibble)
+library(curl)
+library(httr)
+library(pheatmap)
+
+
+
+```
+
+
+## load data
+
+```{r}
+
+# meta = read.xlsx("241210_Joy30_Metadata_correct_format.xlsx")  ?
+
+gene_list <- c("FCGR3A", "ITGAM", "FCGR2A", "IRF8", "NCKAP1L", "BIN2", "HLA-DMB", "CTSS", "CD14", "ITGB2", "TLR6", "DOCK2", "MSR1", "ARHGAP25", "AIF1", "VRK2", "CLEC7A", "TLR2", "C3", "CYFIP1", "CD300A", "SLC11A1", "VAV1", "TREM2", "SYK", "OLR1", "PTPRC")
+
+unfiltered_data <- read_tsv('all_res_vs_ntc1_batch1_q1q3_filter_rmlow.tsv')
+
+filtered_data <- unfiltered_data %>% filter(pvalue < 0.1, # for matching to figure 4A
+                                           gene_name %in% gene_list, 
+                                           ko_gene %in% gene_list)
+
+filtered_data2 <- unfiltered_data %>% filter(padj < 0.1) # for matching to Fig 4C
+
+```
+
+
+## overlay our data with string db in ggraph()
+
+adapted from code originally written by RB
+
+```{r}
+
+#options(download.file.method = "curl", download.file.extra = "-k")
+
+# pull STRINGdb for human (9606)
+string_db <- STRINGdb$new(version = "11.5", species = 9606, score_threshold = 400)
+
+# Get all unique genes from my data (both ko_gene and gene_name)
+all_genes <- unique(c(filtered_data$ko_gene, filtered_data$gene_name))
+gene_df <- data.frame(gene = all_genes)
+
+# Map genes to STRING IDs
+mapped_genes <- string_db$map(gene_df, "gene", removeUnmappedRows = TRUE)
+
+# Get STRING interactions
+string_interactions <- string_db$get_interactions(mapped_genes$STRING_id) 
+
+# Filter to interactions between mapped genes only - should already be this but just in case
+string_interactions_filtered <- string_interactions %>%
+  filter(from %in% mapped_genes$STRING_id & to %in% mapped_genes$STRING_id)
+
+# remove duplicates (a result of bidirectional associations)
+string_interactions_filtered <- distinct(string_interactions_filtered)  
+
+# convert names back from STRING ID to gene symbol
+id_to_gene <- mapped_genes %>% select(STRING_id, gene)
+
+string_edges <- string_interactions_filtered %>%
+  left_join(id_to_gene, by = c("from" = "STRING_id")) %>%
+  rename(source = gene) %>%
+  left_join(id_to_gene, by = c("to" = "STRING_id")) %>%
+  rename(target = gene) %>%
+  mutate(
+    weight = combined_score / 1000,  # normalize STRING confidence - good if plotting
+    edge_key = ifelse(source < target,
+                      paste(source, target, sep = "|"), 
+                      paste(target, source, sep = "|")),
+    edge_type = "string") 
+
+# Prepare experimental edges 
+exp_edges <- filtered_data %>%
+  select(source = ko_gene, target = gene_name, pvalue) %>%
+  filter(source != target) %>% # to prevent same gene pair
+  mutate(
+    weight = 1,  
+    edge_key = ifelse(source < target,
+                      paste(source, target, sep = "|"), 
+                      paste(target, source, sep = "|")),
+    edge_type = "experimental") %>%
+    distinct(edge_key, .keep_all = TRUE) # prevent dupes
+
+
+# Identify overlapping edges between exp and string db
+overlap_keys <- intersect(exp_edges$edge_key, string_edges$edge_key)
+
+# Mark overlaps as 'both'
+both_edges <- exp_edges %>%
+  filter(edge_key %in% overlap_keys) %>%
+  mutate(edge_type = "both")
+
+# Remove overlaps from original sets
+exp_only <- exp_edges %>% filter(!edge_key %in% overlap_keys)
+string_only <- string_edges %>% filter(!edge_key %in% overlap_keys)
+
+# Combine all edges
+all_edges <- bind_rows(exp_only, string_only, both_edges) %>%
+  select(source, target, weight, edge_type)
+
+# Build graph object for use in plot
+g <- graph_from_data_frame(all_edges, directed = FALSE)
+g_tbl <- as_tbl_graph(g)
+
+# set order for plot legend
+g_tbl <- g_tbl %>%
+  activate(edges) %>%
+  mutate(edge_type = factor(edge_type, levels = c("experimental", "string", "both")))
+
+
+# Plot
+ggraph(g_tbl, layout = "fr") +
+  geom_edge_link(aes(color = edge_type, linetype = edge_type), width = 1) +
+  geom_node_point(size = 3) +
+  geom_node_text(aes(label = name), repel = TRUE, fontface="italic", size=5) +
+  scale_edge_color_manual(values = c(
+    "experimental" = "#87CEFA",
+    "string" = "grey60",
+    "both" = "#F5DEB3"
+  ),
+    labels = c(
+      "experimental" = "Experimental (41%) ",
+      "string" = "STRING (36%)",
+      "both" = "Both (23%)"
+    ), name = "Edge Type",) +
+  scale_edge_linetype_manual(values = c(
+    "experimental" = "solid",
+    "string" = "solid",
+    "both" = "solid"
+  )) +
+  theme_void()+
+  theme(legend.text = element_text(face = "bold", family = "Arial", size=14),
+        legend.title = element_text(face = "bold", family = "Arial", size=16))+
+  guides(edge_linetype = "none")
+
+#ggsave("2025.11.11_Fig4B.png",width = 10, height = 8, units = "in", dpi = 300)
+
+print(paste("both : ",nrow(both_edges) / nrow(all_edges)))
+print(paste("exp only : ",nrow(exp_only) / nrow(all_edges)))
+print(paste("string only : ",nrow(string_only) / nrow(all_edges)))
+
+```
+
+
+## calc correlations
+
+```{r}
+
+similarity_df <- data.frame(gene1 = character(), gene2 = character(), 
+                            similarity = numeric(), n_common=numeric(), 
+                            correlation_pval = numeric(), stringsAsFactors = FALSE)
+
+# All pairwise combinations (indexes)
+combs <- combn(filtered_data$gene_name, 2)
+
+# Sort each pair so A–B and B–A look the same
+sorted_pairs <- apply(combs, 2, sort) 
+
+# Create unique keys for each pair
+pair_keys <- apply(sorted_pairs, 2, paste, collapse = "|")
+
+# Keep only one of each unique pair
+unique_cols <- !duplicated(pair_keys)
+
+# Subset combinations to get unique pairs
+combs_unique <- sorted_pairs[, unique_cols] 
+
+# loop through combos
+for (k in 1:ncol(combs_unique)) {
+  gene1 <- combs_unique[1, k]
+  gene2 <- combs_unique[2, k]
+  
+
+  if (gene1 != gene2) { # skip matching pairs (shouldnt have but just in case)
+      
+      # subset DFs for only gene targets in pair
+      gene1_subset <- filtered_data2[filtered_data2$ko_gene==gene1,]
+      gene2_subset <- filtered_data2[filtered_data2$ko_gene==gene2,]
+
+      # subset again for only overlapping deg within those targets
+      gene1_subset2 <- gene1_subset[gene1_subset$gene_name %in% gene2_subset$gene_name,] 
+      gene2_subset2 <- gene2_subset[gene2_subset$gene_name %in% gene1_subset$gene_name,]
+      gene1_subset2 <- arrange(gene1_subset2, gene_name)
+      gene2_subset2 <- arrange(gene2_subset2, gene_name)
+      gene1_cor_vals <- gene1_subset2$log2FoldChange # get values to compare
+      gene2_cor_vals <- gene2_subset2$log2FoldChange
+      
+      # skip ones without enough DEGs
+      if (length(gene2_cor_vals) >= 1) {
+
+      # calculate correlation, similarity, n common DEG between pairs
+      n_common <- nrow(gene1_subset[gene1_subset$gene_name %in% gene2_subset$gene_name,])
+      n_total <- length(unique(c(gene1_subset$gene_name, gene2_subset$gene_name)))
+      jaccard <- n_common / n_total 
+      correlation <- cor(gene1_cor_vals, gene2_cor_vals, use = "pairwise.complete.obs", method = "pearson")
+      
+      # print to check working as expected
+      #print(paste("Genes comparing are", gene1, "and", gene2, sep=" "))
+      #print(paste(gene1,"DEG list:", gene1_subset$gene_name, sep = " "))
+      #print(paste(gene2, "DEG list:", gene2_subset$gene_name, sep = " "))
+      #print(paste("the genes in common are:", c(gene1_subset$gene_name[gene1_subset$gene_name %in% gene2_subset$gene_name]), sep=" "))
+ 
+      # if no correlation between pairs or fewer than 10 genes in common
+      if (is.na(correlation) == T | nrow(gene1_subset[gene1_subset$gene_name %in% gene2_subset$gene_name,])<10) {
+      
+      # add to df with NA as correlation pvalue - cant compute
+      similarity_df <- rbind(similarity_df, data.frame(gene1 = gene1, gene2=gene2, 
+                                                       similarity = jaccard, n_common = n_common, 
+                                                       correlation_pval = NA))
+      } else { # if good add results to df
+        
+        correlation_test <- cor.test(gene1_cor_vals, gene2_cor_vals)
+        corr_pval <- correlation_test$p.value
+        similarity_df <- rbind(similarity_df, data.frame(gene1 = gene1, gene2=gene2, 
+                                                       similarity = jaccard, n_common = n_common, 
+                                                       correlation_pval = corr_pval))
+      }
+  } 
+  }
+}  
+
+similarity_df <- similarity_df %>% filter(similarity!=0)
+similarity_df
+
+```
+
+
+## heatmap for overlap of DEG by gene target
+
+```{r}
+
+# keep only genes that have at least 5 n_common DEG with other target genes
+genes_keep <- unique(c(similarity_df$gene1[similarity_df$n_common>4],similarity_df$gene2[similarity_df$n_common>4]))
+
+# apply 
+similarity_df_filtered <- similarity_df %>% filter(gene1 %in% genes_keep & gene2 %in% genes_keep)
+
+# get target names vector to be used as filter in next step
+all_genes <- unique(c(similarity_df_filtered$gene1, similarity_df_filtered$gene2))
+
+# get target names in order of n_common with other targets
+sorted_counts <- sort(table(unfiltered_data$ko_gene[unfiltered_data$padj < 0.1]), decreasing = F)
+sorted_gene_names <- names(sorted_counts)
+sorted_gene_names_final <- sorted_gene_names[sorted_gene_names %in% all_genes]
+
+# Create a matrix starting point where all vals are 0
+overlap_matrix <- matrix(0, nrow = length(all_genes), ncol = length(all_genes),
+                         dimnames = list(all_genes, all_genes))
+overlap_matrix <- overlap_matrix[sorted_gene_names_final,sorted_gene_names_final]
+
+# Fill matrix with n_common values for each pair using table from last chunk
+for (i in 1:nrow(similarity_df_filtered)) {
+  g1 <- similarity_df_filtered$gene1[i]
+  g2 <- similarity_df_filtered$gene2[i]
+  val <- similarity_df_filtered$n_common[i]
+  
+  overlap_matrix[g1, g2] <- val
+  overlap_matrix[g2, g1] <- val  # symmetric
+}
+
+# show only half the heatmap instead of symmetric square
+overlap_matrix[lower.tri(overlap_matrix)] <- 0
+
+# plot heatmap
+my_breaks <- seq(0, 150, length.out = 1000)
+
+heatmap <- pheatmap(overlap_matrix, 
+         display_numbers = FALSE, 
+         main = "",
+         color = colorRampPalette(c("white", "blue", "magenta"))(1000),
+         na_col = "white",
+         treeheight_col = 0, cluster_rows = F, cluster_cols = F, border_color = "white",
+         breaks = my_breaks,
+         legend_breaks = c(0, 50, 100, 150),
+         legend_labels = c("0", "50", "100", "150"))
+heatmap
+
+```
+
+
+
+
+
